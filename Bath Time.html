@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Bath Time</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #f4f3f2;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    position: fixed;
+    inset: 0;
+  }
+
+  /* Tweaks panel */
+  #tweaks-panel {
+    display: none;
+    position: fixed;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(255,255,255,0.82);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid rgba(200,200,200,0.5);
+    border-radius: 20px;
+    padding: 18px 24px 20px;
+    width: min(340px, calc(100vw - 40px));
+    z-index: 100;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.08);
+  }
+  #tweaks-panel h3 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #888;
+    margin-bottom: 16px;
+  }
+  .tweak-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .tweak-row:last-child { margin-bottom: 0; }
+  .tweak-label {
+    font-size: 13px;
+    color: #444;
+    font-weight: 400;
+  }
+  .color-chips {
+    display: flex;
+    gap: 8px;
+  }
+  .chip {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border-color 0.2s, transform 0.15s;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .chip.active { border-color: #bbb; transform: scale(1.12); }
+  .chip-cool { background: linear-gradient(135deg, #ddeeff, #f0f4ff); }
+  .chip-warm { background: linear-gradient(135deg, #fdf0e4, #fef8f0); }
+  .chip-neutral { background: linear-gradient(135deg, #f5f5f5, #e8e8e8); }
+  .chip-dusk { background: linear-gradient(135deg, #e8e0f0, #f4eef8); }
+
+  input[type=range] {
+    -webkit-appearance: none;
+    width: 140px;
+    height: 3px;
+    border-radius: 2px;
+    background: #ddd;
+    outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #aaa;
+    cursor: pointer;
+  }
+  .range-val {
+    font-size: 11px;
+    color: #999;
+    min-width: 26px;
+    text-align: right;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div id="tweaks-panel">
+  <h3>Tweaks</h3>
+  <div class="tweak-row">
+    <span class="tweak-label">Color</span>
+    <div class="color-chips">
+      <div class="chip chip-cool active" data-mode="cool" title="Cool"></div>
+      <div class="chip chip-warm" data-mode="warm" title="Warm"></div>
+      <div class="chip chip-neutral" data-mode="neutral" title="Neutral"></div>
+      <div class="chip chip-dusk" data-mode="dusk" title="Dusk"></div>
+    </div>
+  </div>
+  <div class="tweak-row">
+    <span class="tweak-label">Speed</span>
+    <input type="range" id="speed-slider" min="10" max="300" value="150">
+    <span class="range-val" id="speed-val">slow</span>
+  </div>
+  <div class="tweak-row">
+    <span class="tweak-label">Depth</span>
+    <input type="range" id="depth-slider" min="5" max="60" value="18">
+    <span class="range-val" id="depth-val">–</span>
+  </div>
+  <div class="tweak-row">
+    <span class="tweak-label">Blur</span>
+    <input type="range" id="blur-slider" min="0" max="12" value="4" step="0.5">
+    <span class="range-val" id="blur-val">–</span>
+  </div>
+</div>
+
+<script>
+// ── WebGL caustic light shader ──────────────────────────────────────────────
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "colorMode": "cool",
+  "speed": 300,
+  "depth": 60,
+  "blur": 0
+}/*EDITMODE-END*/;
+
+const COLOR_MODES = {
+  cool:    { bg: [0.900, 0.908, 0.922], hi: [1.0, 1.0, 1.0],    ac: [0.72, 0.82, 0.96], seam: [0.68, 0.72, 0.80] },
+  warm:    { bg: [0.920, 0.908, 0.892], hi: [1.0, 1.0, 0.995],  ac: [0.96, 0.84, 0.70], seam: [0.74, 0.68, 0.62] },
+  neutral: { bg: [0.905, 0.905, 0.908], hi: [1.0, 1.0, 1.0],    ac: [0.78, 0.78, 0.82], seam: [0.68, 0.68, 0.70] },
+  dusk:    { bg: [0.900, 0.892, 0.915], hi: [1.0, 0.995, 1.0],  ac: [0.74, 0.66, 0.92], seam: [0.64, 0.60, 0.78] },
+};
+
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+
+const VS = `
+attribute vec2 a_pos;
+void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
+`;
+
+const FS = `
+precision highp float;
+uniform vec2  u_res;
+uniform float u_time;
+uniform vec3  u_bg;
+uniform vec3  u_hi;
+uniform vec3  u_ac;
+uniform float u_depth;
+uniform float u_blur;
+
+// ── hash & noise ─────────────────────────────────────
+float hash21(vec2 p) {
+  p = fract(p * vec2(127.1, 311.7));
+  p += dot(p, p + 19.31);
+  return fract(p.x * p.y);
+}
+
+float smoothNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1,0));
+  float c = hash21(i + vec2(0,1));
+  float d = hash21(i + vec2(1,1));
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+
+float fbm(vec2 p, int oct) {
+  float v = 0.0, a = 0.5, tot = 0.0;
+  for (int i = 0; i < 6; i++) {
+    if (i >= oct) break;
+    v   += a * smoothNoise(p);
+    tot += a;
+    p    = p * 2.03 + vec2(3.1, 7.7);
+    a   *= 0.5;
+  }
+  return v / tot;
+}
+
+// Domain-warp caustic field
+float causticField(vec2 uv, float t) {
+  vec2 q = vec2(
+    fbm(uv * 1.8 + t * vec2(0.09, 0.06), 4),
+    fbm(uv * 1.8 + t * vec2(-0.07, 0.10) + vec2(4.2, 1.7), 4)
+  );
+  vec2 r = vec2(
+    fbm(uv * 2.4 + 1.6*q + t * vec2(0.05,-0.08) + vec2(1.7, 9.2), 4),
+    fbm(uv * 2.4 + 1.6*q + t * vec2(0.08, 0.04) + vec2(8.3, 2.8), 4)
+  );
+  float f = fbm(uv * 3.0 + 1.8*r + t * vec2(0.04, 0.03), 5);
+  return f;
+}
+
+// Caustic iso-line — sharp bright edge at level L
+float causticLine(float field, float L, float sharpness) {
+  return 1.0 - smoothstep(0.0, sharpness, abs(field - L));
+}
+
+// Sparkle: tiny bright flashes using layered high-freq noise
+float sparkle(vec2 p, float t) {
+  float n1 = smoothNoise(p * 18.0 + t * vec2(1.3, 0.9));
+  float n2 = smoothNoise(p * 22.0 - t * vec2(0.8, 1.4) + vec2(5.1, 2.3));
+  float n3 = smoothNoise(p * 30.0 + t * vec2(1.1,-1.0) + vec2(1.7, 8.2));
+  float s = pow(n1 * n2 * n3, 3.5) * 28.0;
+  return clamp(s, 0.0, 1.0);
+}
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / u_res;
+  float aspect = u_res.x / u_res.y;
+  vec2 p = uv * vec2(aspect, 1.0);
+  float t = u_time;
+
+  float c1 = causticField(p * 0.9,  t);
+  float c2 = causticField(p * 1.4 + vec2(3.7, 2.1), t * 0.7);
+  float c3 = causticField(p * 0.6 + vec2(1.1, 5.3), t * 0.5);
+
+  float sharpness = u_depth / 1200.0;
+
+  float lines = 0.0;
+  lines += causticLine(c1, 0.50, sharpness)        * 0.90;
+  lines += causticLine(c1, 0.56, sharpness * 1.4)  * 0.60;
+  lines += causticLine(c1, 0.44, sharpness * 1.6)  * 0.45;
+  lines += causticLine(c2, 0.48, sharpness * 1.2)  * 0.75;
+  lines += causticLine(c2, 0.54, sharpness * 1.5)  * 0.50;
+  lines += causticLine(c3, 0.51, sharpness * 2.0)  * 0.35;
+  lines = clamp(lines, 0.0, 1.0);
+
+  float blob = smoothstep(0.42, 0.72, c1) * 0.5
+             + smoothstep(0.38, 0.68, c2) * 0.3
+             + smoothstep(0.44, 0.70, c3) * 0.2;
+  blob = clamp(blob, 0.0, 1.0);
+
+  float sp = sparkle(p, t * 1.4);
+  float caustics = pow(lines, 0.65);
+  float light = blob * 0.30 + caustics * 0.58 + sp * 0.28;
+  light = clamp(light, 0.0, 1.0);
+
+  float tint = fbm(p * 2.5 + t * vec2(0.06, -0.04), 3);
+  vec3 iridescent = mix(u_ac, u_hi, lines);
+
+  vec3 col = mix(u_bg, u_hi, light);
+  col = mix(col, iridescent, lines * 0.22);
+  col = mix(col, u_hi, sp * 0.85);
+  col = mix(col, u_ac, tint * 0.08);
+
+  vec2 vig = uv * 2.0 - 1.0;
+  float v = 1.0 - dot(vig, vig) * 0.22;
+  col *= clamp(v, 0.0, 1.0);
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uRes   = gl.getUniformLocation(prog, 'u_res');
+const uTime  = gl.getUniformLocation(prog, 'u_time');
+const uBg    = gl.getUniformLocation(prog, 'u_bg');
+const uHi    = gl.getUniformLocation(prog, 'u_hi');
+const uAc    = gl.getUniformLocation(prog, 'u_ac');
+const uDepth = gl.getUniformLocation(prog, 'u_depth');
+
+// ── State ──────────────────────────────────────────────────────────────────
+let state = { ...TWEAK_DEFAULTS };
+let colorMode = COLOR_MODES[state.colorMode];
+let startTime = null;
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = canvas.clientWidth  * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+resize();
+window.addEventListener('resize', resize);
+
+function render(ts) {
+  if (!startTime) startTime = ts;
+  const elapsed = (ts - startTime) / 1000;
+  const t = elapsed * (state.speed / 100) * 0.55;
+
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform1f(uTime, t);
+  gl.uniform3fv(uBg,   colorMode.bg);
+  gl.uniform3fv(uHi,   colorMode.hi);
+  gl.uniform3fv(uAc,   colorMode.ac);
+
+  gl.uniform1f(uDepth, state.depth);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ── Tweaks panel ────────────────────────────────────────────────────────────
+function applyBlur(val) {
+  canvas.style.filter = val > 0 ? `blur(${val}px)` : 'none';
+}
+applyBlur(state.blur);
+
+// color chips
+document.querySelectorAll('.chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    state.colorMode = chip.dataset.mode;
+    colorMode = COLOR_MODES[state.colorMode];
+    postEdit();
+  });
+});
+
+// sliders
+const speedSlider = document.getElementById('speed-slider');
+const depthSlider = document.getElementById('depth-slider');
+const blurSlider  = document.getElementById('blur-slider');
+const speedVal    = document.getElementById('speed-val');
+const depthVal    = document.getElementById('depth-val');
+const blurVal     = document.getElementById('blur-val');
+
+function speedLabel(v) { return v < 60 ? 'slow' : v < 160 ? 'med' : v < 250 ? 'fast' : 'storm'; }
+
+speedSlider.value = state.speed;
+depthSlider.value = state.depth;
+blurSlider.value  = state.blur;
+speedVal.textContent = speedLabel(state.speed);
+
+speedSlider.addEventListener('input', () => {
+  state.speed = +speedSlider.value;
+  speedVal.textContent = speedLabel(state.speed);
+  postEdit();
+});
+depthSlider.addEventListener('input', () => {
+  state.depth = +depthSlider.value;
+  postEdit();
+});
+blurSlider.addEventListener('input', () => {
+  state.blur = +blurSlider.value;
+  applyBlur(state.blur);
+  postEdit();
+});
+
+function postEdit() {
+  window.parent.postMessage({ type: '__edit_mode_set_keys', edits: {
+    colorMode: state.colorMode,
+    speed: state.speed,
+    depth: state.depth,
+    blur:  state.blur,
+  }}, '*');
+}
+
+// host handshake — register listener first
+window.addEventListener('message', e => {
+  if (e.data?.type === '__activate_edit_mode')   document.getElementById('tweaks-panel').style.display = 'block';
+  if (e.data?.type === '__deactivate_edit_mode') document.getElementById('tweaks-panel').style.display = 'none';
+});
+window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+
+// init chip state
+document.querySelectorAll('.chip').forEach(c => {
+  c.classList.toggle('active', c.dataset.mode === state.colorMode);
+});
+</script>
+
+<template id="__bundler_thumbnail">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 56">
+  <defs>
+    <radialGradient id="g1" cx="40%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#e8eef8"/>
+      <stop offset="100%" stop-color="#d5dce8"/>
+    </radialGradient>
+  </defs>
+  <rect width="80" height="56" fill="url(#g1)"/>
+  <ellipse cx="32" cy="28" rx="18" ry="12" fill="white" opacity="0.5"/>
+  <ellipse cx="50" cy="22" rx="12" ry="8" fill="white" opacity="0.4"/>
+</svg>
+</template>
+</body>
+</html>
